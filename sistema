@@ -1,0 +1,669 @@
+*
+ * ============================================================================
+ *  SISTEMA DE CADASTRO DE PRODUTOS - LOJA
+ * ============================================================================
+ *  O que o programa faz:
+ *    Um CRUD (Criar, Ler, Atualizar, Deletar) de produtos, com busca,
+ *    ordenação e exportação para CSV.
+ *
+ *  Como os dados são guardados:
+ *    No arquivo "produtos.txt", uma linha por produto, separando os campos
+ *    por ponto e vírgula:
+ *        ID;Nome;Categoria;Preço;Quantidade;Fornecedor
+ *    Exemplo:
+ *        1;Mouse Gamer;Perifericos;89.90;15;TechSul
+ *
+ *  Estratégia geral de cada operação:
+ *    1) Carrega o arquivo para um vetor na memória
+ *    2) Faz a alteração no vetor
+ *    3) Grava o vetor de volta no arquivo (quando a operação modifica dados)
+ * ============================================================================
+ */
+
+// ---------------------------------------------------------------------------
+// BIBLIOTECAS
+// ---------------------------------------------------------------------------
+#include <stdio.h>   // printf, scanf, fgets, fopen, fclose, fprintf, sscanf...
+#include <stdlib.h>  // atof (texto -> float) e atoi (texto -> int)
+#include <string.h>  // strcpy, strcmp, strlen, strstr, strcspn, strcasecmp
+#include <ctype.h>   // Necessário para funções como tolower()
+
+// ---------------------------------------------------------------------------
+// CONSTANTES
+// ---------------------------------------------------------------------------
+// #define cria um "apelido": o compilador troca o nome pelo valor antes de compilar.
+// Vantagem: para mudar o limite basta alterar aqui, em um único lugar.
+#define MAX_PRODUTOS 100            // Tamanho máximo do vetor de estruturas em memória
+#define NOME_ARQUIVO "produtos.txt" // Nome do arquivo de texto padrão (banco de dados)
+#define NOME_TEMP "temp.txt"        // Arquivo temporário usado na exclusão
+
+// ---------------------------------------------------------------------------
+// ESTRUTURA DE DADOS
+// ---------------------------------------------------------------------------
+// struct agrupa vários campos de tipos diferentes em um único "tipo".
+// typedef permite usar apenas "Produto" em vez de "struct Produto".
+// Os tamanhos dos vetores de char incluem 1 posição para o '\0' (fim da string),
+// então "nome" guarda no máximo 49 caracteres úteis.
+typedef struct {
+    int id;              // Identificador único (gerado automaticamente)
+    char nome[50];       // Nome do produto
+    char categoria[30];  // Categoria (ex: Perifericos, Audio...)
+    float preco;         // Preço em reais
+    int quantidade;      // Quantidade em estoque
+    char fornecedor[40]; // Nome do fornecedor
+} Produto;
+
+// ===========================================================================
+//  FUNÇÕES AUXILIARES
+// ===========================================================================
+
+// Converte uma string para minúsculas.
+//   origem  -> texto original (não é modificado, por isso "const")
+//   destino -> onde o resultado será gravado (precisa ter espaço suficiente)
+// Usada para comparar textos sem diferenciar maiúsculas de minúsculas:
+// "Mouse" e "MOUSE" viram ambos "mouse" antes de serem comparados.
+void paraMinusculas(char *destino, const char *origem) {
+    int i = 0;
+    // Percorre a string até encontrar o '\0', que marca o fim do texto
+    while (origem[i] != '\0') {
+        // O cast para unsigned char evita comportamento indefinido do tolower
+        // com caracteres acentuados (valores negativos em char).
+        destino[i] = tolower((unsigned char)origem[i]);
+        i++;
+    }
+    destino[i] = '\0'; // Garante o caractere nulo ao final da string
+}
+
+// Limpa o buffer do teclado.
+// Problema: quando usamos scanf("%d"), o número é lido mas o ENTER que o
+// usuário digitou continua no buffer. Se o próximo comando for fgets, ele lê
+// esse ENTER sozinho e "pula" a pergunta.
+// Solução: ler e descartar tudo até o '\n' (ou até o fim da entrada, EOF).
+void limparBuffer() {
+    int c;
+    // getchar() lê 1 caractere. O laço roda até achar o ENTER ou EOF.
+    // O corpo é vazio (;) porque todo o trabalho acontece na condição.
+    while ((c = getchar()) != '\n' && c != EOF);
+}
+
+// Gera automaticamente o próximo ID, olhando o maior ID já gravado no arquivo.
+// Assim os IDs são sempre crescentes (1, 2, 3...) e nunca se repetem,
+// mesmo que algum produto do meio tenha sido excluído.
+int gerarProximoID() {
+    FILE *arquivo = fopen(NOME_ARQUIVO, "r"); // "r" = abre apenas para leitura
+    if (arquivo == NULL) {
+        // fopen retorna NULL quando o arquivo não existe (primeira execução)
+        return 1; // Se o arquivo não existe, o primeiro ID é 1
+    }
+
+    int maiorId = 0;   // Guarda o maior ID encontrado até agora
+    Produto p;         // Produto temporário só para receber os dados lidos
+    char linha[256];   // Guarda uma linha inteira do arquivo
+
+    // fgets lê uma linha por vez e retorna NULL quando o arquivo acaba
+    while (fgets(linha, sizeof(linha), arquivo) != NULL) {
+        // sscanf funciona como scanf, mas lê de uma string (a "linha") em vez do teclado.
+        // Formato esperado no arquivo texto: ID;Nome;Categoria;Preço;Quantidade;Fornecedor
+        //   %d        -> lê um inteiro
+        //   ;         -> casa com o ponto e vírgula literal
+        //   %49[^;]   -> lê texto até encontrar ';', com no máximo 49 caracteres
+        //   %f        -> lê um número decimal
+        //   %39[^\n]  -> lê o texto até o fim da linha
+        // O retorno do sscanf é a quantidade de campos lidos com sucesso;
+        // só aceitamos a linha se os 6 campos foram lidos (linha válida).
+        if (sscanf(linha, "%d;%49[^;];%29[^;];%f;%d;%39[^\n]", 
+                   &p.id, p.nome, p.categoria, &p.preco, &p.quantidade, p.fornecedor) == 6) {
+            if (p.id > maiorId) {
+                maiorId = p.id; // Atualiza o maior ID
+            }
+        }
+    }
+
+    fclose(arquivo); // Sempre feche o arquivo depois de usar
+    return maiorId + 1; // Retorna o próximo ID incremental
+}
+
+// ===========================================================================
+//  PERSISTÊNCIA (leitura e gravação do arquivo)
+// ===========================================================================
+
+// Carrega os produtos do arquivo para o vetor "lista" (em memória).
+// Retorna quantos produtos foram carregados.
+// Obs.: vetores em C são passados por referência, então o que for gravado em
+// "lista" aqui dentro também aparece na função que chamou.
+int carregarProdutos(Produto lista[]) {
+    FILE *arquivo = fopen(NOME_ARQUIVO, "r");
+    if (arquivo == NULL) {
+        return 0; // Se não existe arquivo, retorna 0 produtos carregados
+    }
+
+    int contador = 0;  // Quantos produtos já foram guardados no vetor
+    char linha[256];
+
+    // O laço para quando o arquivo acaba OU quando o vetor enche
+    // (a segunda condição protege contra estouro do vetor).
+    while (fgets(linha, sizeof(linha), arquivo) != NULL && contador < MAX_PRODUTOS) {
+        // Lê os campos direto para a posição "contador" do vetor.
+        // Em campos numéricos usamos & (endereço da variável);
+        // em vetores de char não precisa, pois o nome do vetor já é um endereço.
+        if (sscanf(linha, "%d;%49[^;];%29[^;];%f;%d;%39[^\n]", 
+                   &lista[contador].id, 
+                   lista[contador].nome, 
+                   lista[contador].categoria, 
+                   &lista[contador].preco, 
+                   &lista[contador].quantidade, 
+                   lista[contador].fornecedor) == 6) {
+            contador++; // Só avança se a linha era válida
+        }
+    }
+
+    fclose(arquivo);
+    return contador; // Retorna a quantidade total de produtos carregados
+}
+
+// Salva todo o vetor de produtos de volta para o arquivo texto.
+//   lista -> vetor com os produtos
+//   total -> quantos produtos do vetor devem ser gravados
+void salvarProdutos(Produto lista[], int total) {
+    // Modo "w" apaga o conteúdo anterior e escreve tudo do zero,
+    // por isso o vetor precisa ter TODOS os produtos, não só o alterado.
+    FILE *arquivo = fopen(NOME_ARQUIVO, "w"); // Modo "w" sobrescreve o arquivo com os dados atualizados
+    if (arquivo == NULL) {
+        printf("\nErro ao abrir o arquivo para escrita!\n");
+        return;
+    }
+
+    for (int i = 0; i < total; i++) {
+        // fprintf é como printf, mas escreve no arquivo.
+        // %.2f grava o preço com 2 casas decimais.
+        fprintf(arquivo, "%d;%s;%s;%.2f;%d;%s\n", 
+                lista[i].id, 
+                lista[i].nome, 
+                lista[i].categoria, 
+                lista[i].preco, 
+                lista[i].quantidade, 
+                lista[i].fornecedor);
+    }
+
+    fclose(arquivo);
+}
+
+// ===========================================================================
+//  EXIBIÇÃO
+// ===========================================================================
+
+// Exibe os produtos em formato de tabela organizada.
+// Códigos de formatação usados no printf:
+//   %-3d    -> inteiro alinhado à esquerda, ocupando 3 posições
+//   %-31s   -> texto alinhado à esquerda, ocupando 31 posições
+//   %-8.2f  -> decimal com 2 casas, alinhado à esquerda, ocupando 8 posições
+// Isso mantém as colunas alinhadas, independentemente do tamanho do conteúdo.
+void exibirTabela(Produto lista[], int total) {
+    if (total == 0) {
+        printf("\nNenhum produto cadastrado no momento.\n");
+        return;
+    }
+
+    // Cabeçalho da tabela
+    printf("\n-------------------------------------------------------------------------------------------------\n");
+    printf("| ID  | Produto                         | Categoria          | Preco (R$) | Qtd | Fornecedor        |\n");
+    printf("-------------------------------------------------------------------------------------------------\n");
+    // Uma linha para cada produto
+    for (int i = 0; i < total; i++) {
+        printf("| %-3d | %-31s | %-18s | R$ %-8.2f | %-3d | %-17s |\n", 
+               lista[i].id, 
+               lista[i].nome, 
+               lista[i].categoria, 
+               lista[i].preco, 
+               lista[i].quantidade, 
+               lista[i].fornecedor);
+    }
+    printf("-------------------------------------------------------------------------------------------------\n");
+}
+
+// ===========================================================================
+//  OPERAÇÕES DO MENU
+// ===========================================================================
+
+// OPÇÃO 1 - Insere um novo produto, com validação de duplicidade por nome.
+void inserirProduto() {
+    Produto lista[MAX_PRODUTOS];            // Vetor que receberá os produtos do arquivo
+    int total = carregarProdutos(lista);    // "total" = quantos já existem
+
+    // Impede estourar o vetor
+    if (total >= MAX_PRODUTOS) {
+        printf("\nLimite máximo de produtos atingido!\n");
+        return;
+    }
+
+    Produto novo; // Produto que será preenchido com os dados digitados
+    novo.id = gerarProximoID(); // Geração automática do ID incremental
+
+    printf("\n--- Cadastrar Novo Produto (ID Automático: %d) ---\n", novo.id);
+    
+    // --- Nome ---
+    // fgets é mais seguro que scanf("%s") porque aceita espaços ("Mouse Gamer")
+    // e respeita o tamanho máximo informado.
+    printf("Digite o nome do produto: ");
+    fgets(novo.nome, sizeof(novo.nome), stdin);
+    // fgets guarda o '\n' do ENTER no texto. strcspn devolve a posição do primeiro
+    // '\n'; trocamos essa posição por '\0' para "cortar" a string ali.
+    novo.nome[strcspn(novo.nome, "\n")] = '\0'; // Remove a quebra de linha do final
+
+    // --- Verificação de duplicidade de nome (case-insensitive) ---
+    char nomeNovoLower[50], nomeExistenteLower[50];
+    paraMinusculas(nomeNovoLower, novo.nome); // Nome digitado em minúsculas
+
+    for (int i = 0; i < total; i++) {
+        paraMinusculas(nomeExistenteLower, lista[i].nome); // Nome já cadastrado em minúsculas
+        // strcmp retorna 0 quando as duas strings são iguais
+        if (strcmp(nomeNovoLower, nomeExistenteLower) == 0) {
+            printf("\nErro: Ja existe um produto cadastrado com esse nome!\n");
+            return; // Cancela o cadastro
+        }
+    }
+
+    // --- Categoria ---
+    printf("Digite a categoria: ");
+    fgets(novo.categoria, sizeof(novo.categoria), stdin);
+    novo.categoria[strcspn(novo.categoria, "\n")] = '\0';
+
+    // --- Preço e quantidade ---
+    // scanf lê números direto do teclado. O & passa o ENDEREÇO da variável,
+    // para o scanf poder gravar o valor nela.
+    printf("Digite o preço (ex: 49.90): ");
+    scanf("%f", &novo.preco);
+
+    printf("Digite a quantidade em estoque: ");
+    scanf("%d", &novo.quantidade);
+    limparBuffer(); // Descarta o ENTER que o scanf deixou, antes do próximo fgets
+
+    // --- Fornecedor ---
+    printf("Digite o fornecedor: ");
+    fgets(novo.fornecedor, sizeof(novo.fornecedor), stdin);
+    novo.fornecedor[strcspn(novo.fornecedor, "\n")] = '\0';
+
+    // Adiciona o novo produto na primeira posição livre do vetor (índice "total")
+    // e grava o vetor inteiro (agora com total + 1 produtos) no arquivo.
+    lista[total] = novo;
+    salvarProdutos(lista, total + 1);
+
+    printf("\nProduto cadastrado com sucesso!\n");
+}
+
+// OPÇÃO 2 - Lista todos os produtos do arquivo em formato de tabela.
+void listarProdutos() {
+    Produto lista[MAX_PRODUTOS];
+    int total = carregarProdutos(lista); // Lê o arquivo
+    exibirTabela(lista, total);          // Mostra na tela
+}
+
+// OPÇÃO 3 - Busca produtos por nome ou categoria (case-insensitive).
+void buscarProdutos() {
+    Produto lista[MAX_PRODUTOS];
+    int total = carregarProdutos(lista);
+
+    if (total == 0) {
+        printf("\nNenhum produto cadastrado para buscar.\n");
+        return;
+    }
+
+    // Pergunta em qual campo o usuário quer pesquisar
+    int opcao;
+    printf("\n--- Buscar Produto ---\n");
+    printf("1. Buscar por Nome\n");
+    printf("2. Buscar por Categoria\n");
+    printf("Escolha uma opcao: ");
+    scanf("%d", &opcao);
+    limparBuffer();
+
+    // Lê o texto que será procurado
+    char termo[50];
+    printf("Digite o termo de busca: ");
+    fgets(termo, sizeof(termo), stdin);
+    termo[strcspn(termo, "\n")] = '\0';
+
+    char termoLower[50], campoLower[50];
+    paraMinusculas(termoLower, termo); // Termo em minúsculas para comparar
+
+    int encontrados = 0; // Contador de resultados
+    printf("\nResultados da Busca:\n");
+    printf("-------------------------------------------------------------------------------------------------\n");
+    printf("| ID  | Produto                         | Categoria          | Preco (R$) | Qtd | Fornecedor        |\n");
+    printf("-------------------------------------------------------------------------------------------------\n");
+
+    // Percorre todos os produtos, testando cada um
+    for (int i = 0; i < total; i++) {
+        // Escolhe qual campo será comparado, conforme a opção do usuário
+        if (opcao == 1) {
+            paraMinusculas(campoLower, lista[i].nome);
+        } else {
+            // Atenção: qualquer opção diferente de 1 cai aqui e busca por categoria
+            paraMinusculas(campoLower, lista[i].categoria);
+        }
+
+        // strstr verifica se o termo buscado está contido no campo (pesquisa parcial ou exata).
+        // Retorna NULL se não encontrar. Ex.: "mou" é encontrado em "mouse gamer".
+        if (strstr(campoLower, termoLower) != NULL) {
+            printf("| %-3d | %-31s | %-18s | R$ %-8.2f | %-3d | %-17s |\n", 
+                   lista[i].id, lista[i].nome, lista[i].categoria, lista[i].preco, lista[i].quantidade, lista[i].fornecedor);
+            encontrados++;
+        }
+    }
+    printf("-------------------------------------------------------------------------------------------------\n");
+    printf("Total de itens encontrados: %d\n", encontrados);
+}
+
+// OPÇÃO 4 - Altera um produto existente.
+// Regra: se o usuário apertar só ENTER em um campo, o valor atual é mantido.
+void alterarProduto() {
+    Produto lista[MAX_PRODUTOS];
+    int total = carregarProdutos(lista);
+
+    if (total == 0) {
+        printf("\nNenhum produto cadastrado para alterar.\n");
+        return;
+    }
+
+    exibirTabela(lista, total); // Mostra os produtos para o usuário ver os IDs
+
+    int idBusca;
+    printf("\nDigite o ID do produto que deseja alterar: ");
+    scanf("%d", &idBusca);
+    limparBuffer();
+
+    // Procura em qual posição do vetor está o produto com esse ID.
+    // -1 significa "ainda não encontrei" (índices válidos começam em 0).
+    int index = -1;
+    for (int i = 0; i < total; i++) {
+        if (lista[i].id == idBusca) {
+            index = i;
+            break; // Já achou, não precisa continuar procurando
+        }
+    }
+
+    if (index == -1) {
+        printf("\nProduto com ID %d nao encontrado!\n", idBusca);
+        return;
+    }
+
+    printf("\nEditando o produto: %s\n", lista[index].nome);
+    
+    // --- Nome ---
+    printf("Novo nome (atual: %s): ", lista[index].nome);
+    char buffer[50]; // Área temporária para o texto digitado
+    fgets(buffer, sizeof(buffer), stdin);
+    buffer[strcspn(buffer, "\n")] = '\0';
+    // strlen > 0 significa que o usuário digitou algo; se só deu ENTER, mantém o antigo
+    if (strlen(buffer) > 0) {
+        strcpy(lista[index].nome, buffer); // Copia o novo texto para o produto
+    }
+
+    // --- Categoria ---
+    printf("Nova categoria (atual: %s): ", lista[index].categoria);
+    fgets(buffer, sizeof(buffer), stdin);
+    buffer[strcspn(buffer, "\n")] = '\0';
+    if (strlen(buffer) > 0) {
+        strcpy(lista[index].categoria, buffer);
+    }
+
+    // --- Preço ---
+    // Aqui o número é lido como TEXTO (fgets) e depois convertido (atof).
+    // Motivo: com scanf não seria possível detectar o "só ENTER".
+    printf("Novo preco (atual: %.2f): ", lista[index].preco);
+    char precoStr[20];
+    fgets(precoStr, sizeof(precoStr), stdin);
+    // Se só apertou ENTER, a string tem tamanho 1 (apenas o '\n')
+    if (strlen(precoStr) > 1) {
+        lista[index].preco = atof(precoStr); // atof: texto -> número decimal
+    }
+
+    // --- Quantidade ---
+    printf("Nova quantidade (atual: %d): ", lista[index].quantidade);
+    char qtdStr[20];
+    fgets(qtdStr, sizeof(qtdStr), stdin);
+    if (strlen(qtdStr) > 1) {
+        lista[index].quantidade = atoi(qtdStr); // atoi: texto -> número inteiro
+    }
+
+    // --- Fornecedor ---
+    printf("Novo fornecedor (atual: %s): ", lista[index].fornecedor);
+    fgets(buffer, sizeof(buffer), stdin);
+    buffer[strcspn(buffer, "\n")] = '\0';
+    if (strlen(buffer) > 0) {
+        strcpy(lista[index].fornecedor, buffer);
+    }
+
+    // Salva o vetor atualizado de volta no arquivo principal
+    salvarProdutos(lista, total);
+    printf("\nProduto alterado com sucesso!\n");
+}
+
+// OPÇÃO 5 - Exclui um produto, usando um arquivo temporário.
+void excluirProduto() {
+    Produto lista[MAX_PRODUTOS];
+    int total = carregarProdutos(lista);
+
+    if (total == 0) {
+        printf("\nNenhum produto cadastrado para excluir.\n");
+        return;
+    }
+
+    exibirTabela(lista, total);
+
+    int idBusca;
+    printf("\nDigite o ID do produto que deseja excluir: ");
+    scanf("%d", &idBusca);
+    limparBuffer();
+
+    // Confirma que o ID existe (mesma busca da função alterarProduto)
+    int index = -1;
+    for (int i = 0; i < total; i++) {
+        if (lista[i].id == idBusca) {
+            index = i;
+            break;
+        }
+    }
+
+    if (index == -1) {
+        printf("\nProduto com ID %d nao encontrado!\n", idBusca);
+        return;
+    }
+
+    // Criação de arquivo temporário para evitar corrupção de dados durante a exclusão.
+    // Ideia: escrever os dados corretos em um arquivo novo e só depois trocar pelo original.
+    FILE *temp = fopen(NOME_TEMP, "w");
+    if (temp == NULL) {
+        printf("\nErro ao criar arquivo temporario!\n");
+        return;
+    }
+
+    // Copia para o temporário todos os produtos, EXCETO o que será excluído
+    for (int i = 0; i < total; i++) {
+        if (lista[i].id != idBusca) {
+            fprintf(temp, "%d;%s;%s;%.2f;%d;%s\n", 
+                    lista[i].id, lista[i].nome, lista[i].categoria, 
+                    lista[i].preco, lista[i].quantidade, lista[i].fornecedor);
+        }
+    }
+
+    fclose(temp); // Fecha antes de remover/renomear, para garantir que tudo foi gravado
+
+    // Substitui o arquivo original pelo temporário:
+    //   remove -> apaga o produtos.txt antigo
+    //   rename -> dá o nome "produtos.txt" ao temp.txt
+    remove(NOME_ARQUIVO);
+    rename(NOME_TEMP, NOME_ARQUIVO);
+
+    printf("\nProduto excluído com sucesso!\n");
+}
+
+// OPÇÃO 6 - Ordena os produtos com Bubble Sort e exibe o resultado.
+// A ordenação ocorre só na memória: o arquivo NÃO é alterado.
+void ordenarProdutos() {
+    Produto lista[MAX_PRODUTOS];
+    int total = carregarProdutos(lista);
+
+    // Com 0 ou 1 produto não há o que ordenar
+    if (total <= 1) {
+        printf("\nNao ha produtos suficientes para ordenar.\n");
+        if (total == 1) exibirTabela(lista, total);
+        return;
+    }
+
+    int opcao;
+    printf("\n--- Escolha o criterio de ordenacao (Bubble Sort) ---\n");
+    printf("1. Por Nome (A - Z)\n");
+    printf("2. Por Nome (Z - A)\n");
+    printf("3. Por Preco (Menor -> Maior)\n");
+    printf("4. Por Preco (Maior -> Menor)\n");
+    printf("Opcao: ");
+    scanf("%d", &opcao);
+    limparBuffer();
+
+    // ----- BUBBLE SORT -----
+    // Como funciona: percorre o vetor comparando cada elemento com o vizinho
+    // da direita e troca os dois se estiverem fora de ordem. Ao fim de cada
+    // passada completa, o "maior" elemento da vez "sobe como uma bolha" para
+    // sua posição final. Repete-se até tudo ficar ordenado.
+    //
+    // Laço de fora (i): controla quantas passadas já foram feitas.
+    // Laço de dentro (j): compara os vizinhos. O "- i" no limite existe porque
+    // os últimos i elementos já estão no lugar certo e não precisam ser revistos.
+    for (int i = 0; i < total - 1; i++) {
+        for (int j = 0; j < total - i - 1; j++) {
+            int condicao = 0; // 1 = "os vizinhos estão fora de ordem, troque"
+
+            if (opcao == 1) {
+                // Compara nomes alfabeticamente (A-Z).
+                // strcasecmp ignora maiúsculas/minúsculas; retorna > 0 se o 1º vem depois do 2º.
+                // (Obs.: strcasecmp é de <strings.h>, padrão POSIX; no Windows é _stricmp.)
+                condicao = strcasecmp(lista[j].nome, lista[j + 1].nome) > 0;
+            } else if (opcao == 2) {
+                // Compara nomes alfabeticamente (Z-A): a condição é invertida
+                condicao = strcasecmp(lista[j].nome, lista[j + 1].nome) < 0;
+            } else if (opcao == 3) {
+                // Compara preços (Menor para Maior)
+                condicao = lista[j].preco > lista[j + 1].preco;
+            } else if (opcao == 4) {
+                // Compara preços (Maior para Menor)
+                condicao = lista[j].preco < lista[j + 1].preco;
+            }
+
+            // Realiza a troca dos elementos se a condição for verdadeira.
+            // Troca clássica usando uma variável auxiliar (como trocar o conteúdo
+            // de dois copos usando um terceiro copo vazio).
+            if (condicao) {
+                Produto temp = lista[j];
+                lista[j] = lista[j + 1];
+                lista[j + 1] = temp;
+            }
+        }
+    }
+
+    printf("\nProdutos ordenados com sucesso (exibicao temporaria):\n");
+    exibirTabela(lista, total);
+}
+
+// OPÇÃO 7 - Exporta os dados para um arquivo CSV (abre no Excel/Planilhas).
+void exportarParaCSV() {
+    Produto lista[MAX_PRODUTOS];
+    int total = carregarProdutos(lista);
+
+    if (total == 0) {
+        printf("\nNenhum produto para exportar.\n");
+        return;
+    }
+
+    FILE *csv = fopen("produtos_exportado.csv", "w");
+    if (csv == NULL) {
+        printf("\nErro ao criar arquivo CSV!\n");
+        return;
+    }
+
+    // Primeira linha do CSV: os nomes das colunas
+    fprintf(csv, "ID,Produto,Categoria,Preco,Quantidade,Fornecedor\n");
+
+    // Uma linha por produto. A diferença para o produtos.txt é só o separador:
+    // aqui é vírgula (padrão CSV) em vez de ponto e vírgula.
+    for (int i = 0; i < total; i++) {
+        fprintf(csv, "%d,%s,%s,%.2f,%d,%s\n", 
+                lista[i].id, 
+                lista[i].nome, 
+                lista[i].categoria, 
+                lista[i].preco, 
+                lista[i].quantidade, 
+                lista[i].fornecedor);
+    }
+
+    fclose(csv);
+    printf("\nDados exportados com sucesso para 'produtos_exportado.csv'!\n");
+}
+
+// ===========================================================================
+//  FUNÇÃO PRINCIPAL
+// ===========================================================================
+// Mostra o menu repetidamente até o usuário escolher 0 (Sair).
+int main() {
+    int opcao;
+
+    // do...while executa o bloco pelo menos uma vez e repete enquanto opcao != 0
+    do {
+        // Desenha o menu
+        printf("\n=============================================\n");
+        printf("         SISTEMA DE CADASTRO - LOJA          \n");
+        printf("=============================================\n");
+        printf("1. Inserir Novo Produto\n");
+        printf("2. Listar Produtos (Tabela)\n");
+        printf("3. Buscar Produto por Nome ou Categoria\n");
+        printf("4. Alterar Produto\n");
+        printf("5. Excluir Produto\n");
+        printf("6. Ordenar Produtos (Bubble Sort)\n");
+        printf("7. Exportar para CSV\n");
+        printf("0. Sair\n");
+        printf("Escolha uma opcao: ");
+        
+        // scanf retorna quantos valores leu com sucesso. Se não for 1, o usuário
+        // digitou algo que não é número (ex.: letras).
+        if (scanf("%d", &opcao) != 1) {
+            printf("\nOpcao invalida! Tente novamente.\n");
+            limparBuffer(); // Descarta o texto inválido, senão o laço repetiria sem parar
+            continue;       // Volta direto ao início do laço (mostra o menu de novo)
+        }
+        limparBuffer(); // Remove o ENTER que sobrou da leitura
+
+        // switch/case: executa o bloco correspondente ao valor de "opcao".
+        // Cada "break" impede que a execução "caia" no case seguinte.
+        switch (opcao) {
+            case 1:
+                inserirProduto();
+                break;
+            case 2:
+                listarProdutos();
+                break;
+            case 3:
+                buscarProdutos();
+                break;
+            case 4:
+                alterarProduto();
+                break;
+            case 5:
+                excluirProduto();
+                break;
+            case 6:
+                ordenarProdutos();
+                break;
+            case 7:
+                exportarParaCSV();
+                break;
+            case 0:
+                printf("\nEncerrando o programa. Ate logo!\n");
+                break;
+            default:
+                // Qualquer número que não seja de 0 a 7
+                printf("\nOpcao invalida! Escolha entre 0 e 7.\n");
+        }
+    } while (opcao != 0);
+
+    return 0; // Indica ao sistema operacional que o programa terminou sem erros
+}
